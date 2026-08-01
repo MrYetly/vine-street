@@ -1,2 +1,2 @@
-vine-street:server.c
-	gcc -g server.c -o bin/vine-street
+vine-street:src/server.c
+	gcc -g src/server.c -o bin/vine-street
