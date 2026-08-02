@@ -4,6 +4,8 @@
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
+#include <assert.h>
 
 #define PORT 1362
 #define BUFFER_SIZE 4096
@@ -15,6 +17,7 @@
 #define MAX_METHOD_LEN 16
 #define MAX_VERSION_LEN 16
 #define STATIC_DIR "/home/deploy/dev/ipa-website/static/"
+#define HTTP_VERSION "HTTP/1.1"
 
 typedef struct {
 	char key[MAX_HEADER_KEY_LEN];
@@ -38,7 +41,7 @@ typedef struct {
 
 typedef void (*http_handler_t)(const http_request_t *req, http_response_t *res);
 
-char *load_html(const char filename*, size_t *file_size) {
+char *load_html(const char *filename, size_t *file_size) {
 	FILE *f = NULL;
 	char *buffer = NULL;
 	long size;
@@ -55,30 +58,42 @@ char *load_html(const char filename*, size_t *file_size) {
 	buffer = malloc(size + 1);
 	if (!buffer) goto cleanup;
 
-	fread(buffer, *file_size, 1, f);
+	long bytes_read = fread(buffer, 1, *file_size, f);
+	if (bytes_read < (long) *file_size) {
+		if (feof(f)) {
+			printf("End of file unexpectedly found.\n");
+		} else if (ferror) {
+			goto cleanup;
+		}
+	}
 	buffer[size] = '\0';
 
 	fclose(f);
 	return buffer;
 
 cleanup:
-	perror("Error loading HTML file: ");
+	perror("Error loading HTML file");
 	if (f) fclose(f);
+	if (buffer) {
+		free(buffer);
+		buffer = NULL;
+	}
 	return buffer;
 }
 
-void handle_home(const http_request_t req*, http_response_t res*) {
-	char *body;
-	size_t body_len;
+void handle_home(const http_request_t *req, http_response_t *res) {
+	char *body = NULL;
+	size_t body_len = 0;
 
-	body = load_file(STATIC_DIR "index.html", &body_len);
+	body = load_html(STATIC_DIR "index.html", &body_len);
 
-	res.status_code = 200;
-	res.headers[0].key = "Context-Length";
-	snprintf(res.headers[0].val, sizeof(res.headers[0].val), "%zu", body_len);
-	res.body = body;
-	res.body_len = body_len;
-	
+	if (body) {
+		res->status_code = 200;
+		snprintf(res->headers[0].key, MAX_HEADER_KEY_LEN, "Context-Length");
+		snprintf(res->headers[0].val, MAX_HEADER_VAL_LEN, "%zu", body_len);
+		res->body = body;
+		res->body_len = body_len;
+	}
 }
 
 int main(void) {
@@ -89,7 +104,15 @@ int main(void) {
 			SOCK_STREAM, // TCP
 			0 //choose most common configuration given prev. args
 			);
+	if (server_fd < 0) {
+		perror("Socket creation failed");
+		exit(EXIT_FAILURE);
+	}
 
+	int enable = 1;
+	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+		perror("setsockopt(SO_REUSEADDR) failed");
+	}
 
 	//create instance of sock_addr_in that will be used to bind to socket
 	struct sockaddr_in address = {
@@ -97,27 +120,40 @@ int main(void) {
 		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
 		.sin_port = htons(PORT)
 	};
-	char buffer[BUFFER_SIZE];
-	ssize_t bytes_read;
 
-	//bind address data to socker
+	//bind address data to socket
 	if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
 		perror("bind failed");
-		return -1;
+		exit(EXIT_FAILURE);
 	}
 
 	//open the connection, allow for 10 queued requests before auto-rejection
-	listen(server_fd, REQUEST_QUEUE_LEN);
+	if (listen(server_fd, REQUEST_QUEUE_LEN) < 0) {
+		perror("Failed to set socker status to listen");
+		exit(EXIT_FAILURE);
+	}
 
+	char buffer[BUFFER_SIZE];
+	ssize_t bytes_read;
 	while (1) {
-		int client_fd = accept(server_fd, NULL, NULL); //the client connection is a file. this gets its file descriptor
+		int client_fd = 0;
+		//errors handled internally: if accept or read fail, the socket is broken and no reponse can be sent
+		client_fd = accept(server_fd, NULL, NULL); //the client connection is a file. this gets its file descriptor
+		if (client_fd < 0) {
+			goto socket_error_cleanup;
+		}
 
 		bytes_read = read(client_fd, buffer, sizeof(buffer)-1);
+		if (bytes_read < 0) {
+			goto socket_error_cleanup;
+		}
 		buffer[bytes_read]='\0';
-		printf("\nReceived %zd Bytes:\n%s", bytes_read, buffer);
 
+		//400 error handling: if error, there's something wrong with the user's request
 		char *ptr = buffer;
 		http_request_t req = {0};
+		char *parsed_res = NULL;
+		http_response_t res = { .version = HTTP_VERSION};
 
 		//parse request line
 		for (int i = 0; *ptr != ' ' && i < MAX_METHOD_LEN - 1; ++i) {
@@ -143,52 +179,75 @@ int main(void) {
 		//parse body
 
 		//create response
-		http_response_t res = {0};
-		handle_home(req, res);
+		//500 error handling: from here on, if error then we fucked up.
+		//need to implement route table eventually, w/ error handling
+		handle_home(&req, &res);
+		if (!res.body) goto server_error_cleanup;
 
-		size_t res_header_len =	sizeof(res.version) + 1
-					3 + 1 //status code;
+		//malloc for parsed response
+		size_t res_header_len =	strlen(res.version) + 1
+					+ 3 + 1 //status code and required extra space
 					+ 2; //CRLF
-		for (int i = 0; res.headers[i].key && i < MAX_HEADERS; i++) {
-			res_header_len += 	sizeof(res.headers[i].key)
-						+2 //colon and space
-						+ sizeof(res.headers[i].val)
+		for (int i = 0; i < MAX_HEADERS && res.headers[i].key[0] != '\0'; i++) {
+			res_header_len += 	strlen(res.headers[i].key)
+						+ 2 //colon and space
+						+ strlen(res.headers[i].val)
 						+ 2; //CRLF
 		}
-		res_header_len += 2; //double CRLF marking end of headers
+		res_header_len += 2; //second CRLF in a row, marking end of headers
+		size_t parsed_res_len = res_header_len + res.body_len;
+		parsed_res = malloc(parsed_res_len);
+		if (!parsed_res) goto server_error_cleanup;
 
-		char *res_string = NULL;
-		size_t res_string_len = res_header_len + res.body_len;
-		res_string = malloc(res_string_len);
-
+		//parse response
 		//write version and status line
-		size_t remaining = res_string_len;
-		char fmt[]= "%s %d\r\n";
-		int char_entered = snprintf(res_string, remaining, fmt, res.version, res.status_code);
+		int char_entered = snprintf(parsed_res, parsed_res_len,  "%s %d \r\n", res.version, res.status_code);
+		if (char_entered < 0) goto server_error_cleanup;
 		size_t offset = (size_t) char_entered;
-		remaining -= (size_t) offset;
 
 		//write headers
-		char header_fmt[]="%s: %s\r\n";
-		for (int = i 0; res.headers[i].key && i < MAX_HEADERS; ++i) {
-			char_entered = snprintf(res_string + (size_t) offset, remaining, header_fmt, res.headers[i].key, res.headers[i].val);
-			offset = char_entered;
+		for (int i = 0; i < MAX_HEADERS && res.headers[i].key[0] != '\0'; ++i) {
+			char_entered = snprintf(
+					parsed_res + offset,
+					parsed_res_len - offset,
+					"%s: %s\r\n",
+					res.headers[i].key,
+					res.headers[i].val);
+			if (char_entered <0) goto server_error_cleanup;
+			offset += (size_t) char_entered;
 		}
+		char_entered = snprintf(parsed_res + offset, parsed_res_len - offset,  "\r\n");
+		if (char_entered < 0) goto server_error_cleanup;
+		offset += (size_t) char_entered;
+		assert(strlen(parsed_res) == res_header_len);
 
-		//stopped here
+		//write body
+		memcpy(parsed_res + offset, res.body, res.body_len);
 
-		//typedef struct {
-		//	char version[MAX_VERSION_LEN];
-		//	int status_code;
-		//	http_header_t headers[MAX_HEADERS];
-		//	char *body;
-		//	size_t body_len;
-		//} http_response_t;
+		//send response
+		write(client_fd, parsed_res, parsed_res_len);
 
-		write(client_fd, res_string, res_string_len);
-		free(res_string);
-
+		//cleanup
+		free(parsed_res);
 		close(client_fd);
+		continue;
+
+		socket_error_cleanup:
+			perror("Socket error");
+			if (client_fd) close(client_fd);
+			continue;
+		server_error_cleanup:
+			perror("Server error");
+			const char *server_error_response = 
+				"HTTP/1.1 500 But why male models?\r\n"
+				"Content-Length: 0\r\n"
+				"Connection: close\r\n"
+				"\r\n";
+			write(client_fd, server_error_response, strlen(server_error_response));
+			if (client_fd) close(client_fd);
+			if (parsed_res) free(parsed_res);
+			continue;
+
 	}
 
 	return 0;
