@@ -7,96 +7,10 @@
 #include <string.h>
 #include <assert.h>
 
-#define PORT 1362
-#define BUFFER_SIZE 4096
-#define REQUEST_QUEUE_LEN 10
-#define MAX_HEADERS 32
-#define MAX_HEADER_KEY_LEN 64
-#define MAX_HEADER_VAL_LEN 512
-#define MAX_PATH_LEN 2048
-#define MAX_METHOD_LEN 16
-#define MAX_VERSION_LEN 16
-#define STATIC_DIR "/home/deploy/dev/ipa-website/static/"
-#define HTTP_VERSION "HTTP/1.1"
+#include "server.h"
 
-typedef struct {
-	char key[MAX_HEADER_KEY_LEN];
-	char val[MAX_HEADER_VAL_LEN];
-} http_header_t;
-
-typedef struct {
-	char method[MAX_METHOD_LEN];
-	char path[MAX_PATH_LEN];
-	char version[MAX_VERSION_LEN];
-	//need to parse headers eventually
-} http_request_t;
-
-typedef struct {
-	char version[MAX_VERSION_LEN];
-	int status_code;
-	http_header_t headers[MAX_HEADERS];
-	char *body;
-	size_t body_len;
-} http_response_t;
-
-typedef void (*http_handler_t)(const http_request_t *req, http_response_t *res);
-
-char *load_html(const char *filename, size_t *file_size) {
-	FILE *f = NULL;
-	char *buffer = NULL;
-	long size;
-
-	f = fopen(filename, "rb");
-	if (!f) goto cleanup;
-
-	//get file length
-	fseek(f, 0, SEEK_END);
-	size = ftell(f);
-	fseek(f, 0, SEEK_SET);
-
-	*file_size = (size_t) size;
-	buffer = malloc(size + 1);
-	if (!buffer) goto cleanup;
-
-	long bytes_read = fread(buffer, 1, *file_size, f);
-	if (bytes_read < (long) *file_size) {
-		if (feof(f)) {
-			printf("End of file unexpectedly found.\n");
-		} else if (ferror) {
-			goto cleanup;
-		}
-	}
-	buffer[size] = '\0';
-
-	fclose(f);
-	return buffer;
-
-cleanup:
-	perror("Error loading HTML file");
-	if (f) fclose(f);
-	if (buffer) {
-		free(buffer);
-		buffer = NULL;
-	}
-	return buffer;
-}
-
-void handle_home(const http_request_t *req, http_response_t *res) {
-	char *body = NULL;
-	size_t body_len = 0;
-
-	body = load_html(STATIC_DIR "index.html", &body_len);
-
-	if (body) {
-		res->status_code = 200;
-		snprintf(res->headers[0].key, MAX_HEADER_KEY_LEN, "Context-Length");
-		snprintf(res->headers[0].val, MAX_HEADER_VAL_LEN, "%zu", body_len);
-		res->body = body;
-		res->body_len = body_len;
-	}
-}
-
-int main(void) {
+//need to change this to "server" and give it arguments (const pointer to route table?)
+void app(const route_t *routes, size_t route_count) {
 	//create unbound socket that we will later bind to
 	//this has buffers (for data i/o), configuration (TCP vs UDP, IP4 vs IP6), and state (connection status, etc)
 	int server_fd = socket(
@@ -117,7 +31,7 @@ int main(void) {
 	//create instance of sock_addr_in that will be used to bind to socket
 	struct sockaddr_in address = {
 		.sin_family = AF_INET,
-		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_addr.s_addr = htonl(ADDRESS),
 		.sin_port = htons(PORT)
 	};
 
@@ -129,7 +43,7 @@ int main(void) {
 
 	//open the connection, allow for 10 queued requests before auto-rejection
 	if (listen(server_fd, REQUEST_QUEUE_LEN) < 0) {
-		perror("Failed to set socker status to listen");
+		perror("Failed to set socket status to listen");
 		exit(EXIT_FAILURE);
 	}
 
@@ -181,8 +95,11 @@ int main(void) {
 		//create response
 		//500 error handling: from here on, if error then we fucked up.
 		//need to implement route table eventually, w/ error handling
-		handle_home(&req, &res);
-		if (!res.body) goto server_error_cleanup;
+
+
+
+		//handle_home(&req, &res);
+		if (res.status_code  != 200) goto server_error_cleanup;
 
 		//malloc for parsed response
 		size_t res_header_len =	strlen(res.version) + 1
