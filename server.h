@@ -11,6 +11,7 @@
 #define MAX_PATH_LEN 2048
 #define MAX_METHOD_LEN 16
 #define MAX_VERSION_LEN 16
+#define MAX_PHRASE_LEN 32
 #define HTTP_VERSION "HTTP/1.1"
 
 typedef struct {
@@ -28,16 +29,18 @@ typedef struct {
 typedef struct {
 	char version[MAX_VERSION_LEN];
 	int status_code;
+	char reason_phrase[MAX_PHRASE_LEN];
 	http_header_t headers[MAX_HEADERS];
+	int next_header_idx;
 	char *body;
-	size_t body_len;
+	size_t body_size;
 } http_response_t;
 
 typedef void (*http_handler_t)(const http_request_t *req, http_response_t *res);
 
 typedef struct {
-	char *method;
 	char *path;
+	char *method;
 	http_handler_t handler;
 } route_t;
 
