@@ -103,11 +103,11 @@ pthread_cond_signal(&work_cond);
 pthread_mutex_unlock(&work_mutex);
 ```
 
-Since we are manipulating data that two threads are operating on, we must get the mutex lock to make sure any operations are safe, this is why we wrap the code interacting with the `work_queue` and signaling the worker that work is ready (`pthread_cond_signal`). Note that `work_queue` is populated with client connections, we will also need to populate it with the buffer filled by `read`, probably using snprintf.
+Since we are manipulating data that two threads are operating on, we must get the mutex lock to make sure any operations are thread safe, this is why we wrap the code interacting with the `work_queue` and signaling the worker that work is ready (`pthread_cond_signal`). Note that `work_queue` is populated with client connections, we will also need to populate it with the buffer filled by `read`, probably using snprintf.
 
 Work is added to the tail of the queue; the worker will process from the head. A circular queue is implemeted by the pattern `(work_tail + 1) % QUEUE_SIZE`, this prevents both buffer overflows and easily enables the tasks in the queue to wrap around the buffer. (When do I have to worry about the tail lapping the head?).
 
-Finally, the worker is signaled with `pthread_cond_signal`.
+Finally, the worker is signaled with `pthread_cond_signal`, which wakes up one worker.
 
 1. Worker loop processes job
 
@@ -143,6 +143,9 @@ void* worker_thread_func(void* arg) {
 }
 ```
 
-This hypothetical worker has been waiting, blocked, ever since `pthread_cond_wait` was called. It is important to remember that `pthread_cond_wait` releases the mutex when it blocks the thread, and then waits to get it back when the thread is unblocked by the OS. At htis point, whatever blocking operation can take place, and it won't stop the server from accepting requests and enqueueing work for the other worker threads. Once the work is done, the lock for the `done_queue` is requested and the task is added to the queue's tail.
+This hypothetical worker has been waiting, blocked, ever since `pthread_cond_wait` was called. It is important to remember that `pthread_cond_wait` releases the mutex when it blocks the thread, and then waits to get it back when the thread is unblocked by the OS. It goes back into action when the dispatch loop calls `pthread_cond_signal`. At this point, whatever blocking operation can take place, and it won't stop the server from accepting requests and enqueueing work for the other worker threads. Once the work is done, the lock for the `done_queue` is requested and the task is added to the queue's tail.
 
 (how does eventfd come into play?)
+Why do we need both server and client connections to be non-blocking?
+what does EPOLLONESHOT do exactly?
+How should I pass routes into app now that I have worker threads?
