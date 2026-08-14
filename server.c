@@ -273,7 +273,7 @@ void app(const route_t *routes, size_t route_count) {
 	ssize_t bytes_read;
 	struct epoll_event events[MAX_EVENTS];
 	while (1) {
-		int nfds = epoll_wait(epoll, events, MAX_EVENTS, -1); //-1 sets no timeout, blocks until events occur
+		int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1); //-1 sets no timeout, blocks until events occur
 
 		for (int i = 0; i < nfds; i++) {
 			int fd = events[i].data.fd;
