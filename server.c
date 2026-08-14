@@ -200,15 +200,151 @@ void* worker_thread_func(void* arg) {
 		work_head = (work_head + 1) % QUEUE_SIZE;
 		pthread_mutex_unlock(&work_mutex);
 
-		//implement request logic
+		//400 error handling: if error, there's something wrong with the user's request
+		route_t *routes = (app_init_t *)arg->routes;
+		size_t route_count = (app_init_t *)arg->route_count;
+		char *ptr = task.req_buffer;
+		http_request_t req = {0};
+		char *parsed_res = NULL;
+		http_response_t res = {
+			.version = HTTP_VERSION,
+			.headers[0].key = "Connection",
+			.headers[0].val = "close",
+			.next_header_idx = 1,
+		};
 
-		pthread_mutex_lock(&done_mutex);
-		done_queue[done_tail] = task;
-		done_tail = (done_tail +1) % QUEUE_SIZE;
-		pthread_mutex_unlock(&done_mutex);
+		//parse request line
+		for (int i = 0; *ptr != ' ' && i < MAX_METHOD_LEN - 1; ++i) {
+			req.method[i] = *ptr;
+			++ptr;
+		}
+		++ptr;
+		for (int i = 0; *ptr != ' ' && i < MAX_PATH_LEN -1; ++i) {
+			req.path[i] = *ptr;
+			++ptr;
+		}
+		++ptr;
+		for (int i = 0; *ptr != '\n' && i < MAX_VERSION_LEN -1; ++i) {
+			if (*ptr != '\r') {
+				req.version[i] = *ptr;
+			}
+			++ptr;
+		}
+		++ptr;
 
-		uint64_t signal_val = 1;
-		eventfd_write(notify_fd, signal_val);
+		//parse headers
+
+		//parse body
+
+
+		//very naive matching process, may need to improve later
+		http_handler_t handler;
+		for (int i = 0; i < route_count; ++i) {
+			if (strcmp(req.path, (routes + i)->path) == 0) {
+				goto path_matched;
+			}
+		}
+		res.status_code = 404;
+		snprintf(res.reason_phrase, MAX_PHRASE_LEN, "Not Found");
+		snprintf(res.headers[res.next_header_idx].key, MAX_HEADER_KEY_LEN, "Content-Length");
+		snprintf(res.headers[res.next_header_idx].val, MAX_HEADER_VAL_LEN, "0");
+		++res.next_header_idx;
+		goto skip_handler_because_of_error;
+
+		path_matched:
+		for (int i=0; i< route_count; ++i) {
+			if (strcmp(req.path, (routes + i)->path) == 0) {
+				if (strcmp(req.method, (routes + i)->method) == 0) {
+					handler = (routes + i)->handler;
+					goto matching_done;
+				}
+			}
+		}
+		res.status_code = 405;
+		snprintf(res.reason_phrase, MAX_PHRASE_LEN, "Method Not Allowed");
+		snprintf(res.headers[res.next_header_idx].key, MAX_HEADER_KEY_LEN, "Content-Length");
+		snprintf(res.headers[res.next_header_idx].val, MAX_HEADER_VAL_LEN, "0");
+		++res.next_header_idx;
+		goto skip_handler_because_of_error;
+
+		matching_done:
+		//create response
+		//500 error handling: from here on, if error then we fucked up.
+		handler(&req, &res);
+
+		skip_handler_because_of_error:
+		//malloc for parsed response
+		size_t res_header_strlen =	strlen(res.version) + 1
+						+ 3 + 1 //status code
+						+ strlen(res.reason_phrase)
+						+ 2; //CRLF
+		for (int i = 0; i < MAX_HEADERS && res.headers[i].key[0] != '\0'; i++) {
+			res_header_strlen += 	strlen(res.headers[i].key)
+						+ 2 //colon and space
+						+ strlen(res.headers[i].val)
+						+ 2; //CRLF
+		}
+		res_header_strlen += 2; //second CRLF in a row, marking end of headers
+		size_t res_header_size = res_header_strlen + 1;
+		size_t parsed_res_size = res_header_strlen + res.body_size;
+		parsed_res = malloc(parsed_res_size + 1); //leave room for null terminator incase body is text and we need to print
+		if (!parsed_res) goto response_parse_error;
+		parsed_res[parsed_res_size] = '\0';
+
+		//parse response
+		//write version, status, and reason phrase line
+		int char_entered = snprintf(
+				parsed_res,
+				res_header_size,
+				"%s %d %s\r\n",
+				res.version,
+				res.status_code,
+				res.reason_phrase);
+		if (char_entered < 0) goto response_parse_error;
+		size_t offset = (size_t) char_entered;
+
+		//write headers
+		for (int i = 0; i < MAX_HEADERS && res.headers[i].key[0] != '\0'; ++i) {
+			char_entered = snprintf(
+					parsed_res + offset,
+					res_header_size - offset,
+					"%s: %s\r\n",
+					res.headers[i].key,
+					res.headers[i].val);
+			if (char_entered <0) goto response_parse_error;
+			offset += (size_t) char_entered;
+		}
+		char_entered = snprintf(parsed_res + offset, res_header_size - offset,  "\r\n");
+		if (char_entered < 0) goto response_parse_error;
+		offset += (size_t) char_entered;
+		assert(strlen(parsed_res) == res_header_strlen);
+
+		//write body
+		if (res.body) memcpy(parsed_res + offset, res.body, res.body_size);
+
+		//write to task
+		task.parsed_res = parsed_res;
+		task.parsed_res_size = parsed_res_size;
+		goto done;
+
+		parse_response_error:
+			perror("Response parse error");
+			char *response_parse_error_response = 
+				"HTTP/1.1 500 But why male models?\r\n"
+				"Context-Length: 0\r\n"
+				"Connection: close\r\n"
+				"\r\n";
+			task.parsed_res = response_parse_error_response;
+			task.parse_res_size = strlen(response_parse_error_response);
+			goto done;
+
+		done:
+			pthread_mutex_lock(&done_mutex);
+			done_queue[done_tail] = task;
+			done_tail = (done_tail +1) % QUEUE_SIZE;
+			pthread_mutex_unlock(&done_mutex);
+			uint64_t signal_val = 1;
+			eventfd_write(notify_fd, signal_val);
 	}
 	return NULL;
 }
@@ -220,13 +356,13 @@ static int set_nonblocking(int fd) {
 	return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void app(const route_t *routes, size_t route_count) {
+void app(const *app_init_t) {
 	//start eventfd for epoll to track
 	notify_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC); //using CLOEXEC is defensive, incase other libraries use fork() + exec()
 
 	//start worker thread(s)
 	pthread_t worker;
-	pthread_create(&worker, NULL, worker_thread_func, NULL);
+	pthread_create(&worker, NULL, worker_thread_func, app_init_t);
 
 	//create socket
 	int server_fd = socket(
@@ -281,7 +417,8 @@ void app(const route_t *routes, size_t route_count) {
 			if (fd == server_fd) {
 				int client_fd = accept(server_fd, NULL, NULL);
 				if (client_fd < 0) {
-					goto socket_error; //need to reimplement these goto probably
+					perror("Socket error");
+					continue;
 				} else {
 					set_nonblocking(client_fd);
 					ev.events = EPOLLIN | EPOLLONESHOT;
@@ -289,9 +426,44 @@ void app(const route_t *routes, size_t route_count) {
 					epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
 				}
 			} else if (fd == notify_fd) {
-				//implement processing finished work
+				eventfd_t val;
+				eventfd_read(notify_fd, &val);
+
+				//drain completed tasks
+				pthread_mutex_lock(&done_mutex);
+				while (done_head != done_tail) {
+					task_t task = done_queue[done_head];
+					done_head = (done_head + 1) & QUEUE_SIZE;
+
+					ssize_t bytes_written = write(task.client_fd, task.parsed_res, task.parsed_res_size);
+					if (bytes_written < 0) {
+						perror("Socket error");
+					}
+
+					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task.client_fd, NULL);
+					close(task.task_fd);
+				}
+				pthread_mutex_unlock(&done_mutex);
 			} else {
-				//implement reading client requests
+				bytes_read = read(fd, buffer, BUFFER_SIZE-1);
+				if (bytes_read < 0) {
+					perror("Socket error");
+					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+					close(fd);
+					continue;
+				}
+				buffer[bytes_read] = '\0';
+
+				pthread_mutex_lock(&work_mutex);
+
+				work_queue[work_tail].client_fd = fd;
+				snprintf(work_queue[work_tail].req_buffer, BUFFER_SIZE, buffer);
+
+				work_tail = (work_tail +1) % work_tail;
+
+				pthread_cond_signal(&work_cond);
+
+				pthread_mutex_unlock(&work_mutex);
 			}
 		}
 

@@ -45,11 +45,19 @@ typedef struct {
 	http_handler_t handler;
 } route_t;
 
-void app(const route_t *routes, size_t route_count);
+//need route initializatoin struct
+typedef struct {
+	route_t *routes;
+	size_t route_count;
+} app_init_t;
+
+void app(const *app_init_t);
 
 //task structure passed between threads
 typdef struct{
 	int client_fd;
-	char response_payload[BUFFER_SIZE];
+	char req_buffer[BUFFER_SIZE];
+	void *parsed_res;
+	size_t parsed_res_size;
 } task_t;
 

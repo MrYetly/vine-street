@@ -4,13 +4,13 @@ Maybe there is some way to benchmark aio performance?
 
 ## Non-blocking file descriptors
 
-Many of the technologies implemented here are represented by Linux as file descriptors. As such, any I/O operations associated with them can be set to be blocking or non-blocking. When a file descriptor is set to blocking, the process that calls `read()` or `write()` on it will be put to sleep by the kernel until the kernel has prepared the read or write buffer. When it is set to non-blocking, the kernel will either return a partial read or write when the process calls `read()` or `write()` if there is data present, or it will return -1 and set `errno` to `EAGAIN` OR `EWOULDBLOCK` if there is no data or room available, indicating the process should try again later.
+Many of the technologies implemented here are represented by Linux as file descriptors. As such, any I/O operations associated with them can be set to be blocking or non-blocking. When a file descriptor is set to blocking, the process that calls `read()` or `write()` on it will be put to sleep by the kernel until the kernel has prepared the read or write buffer. When it is set to non-blocking, the kernel will either return a partial read or write if there is data present, or it will return -1 and set `errno` to `EAGAIN` OR `EWOULDBLOCK` if there is no data in or room available on the buffer, indicating the process should try again later.
 
 It should be emphasized that this does not apply to "normal" files, such as CSV, txt, or HTML. Reading or writing these files always bblocks.
 
 ## Epoll
 
-Epoll is an api provided by the linux OS. The main way a user (developer) interacts with it is through an epoll instance, which lives in memory and is entirely managed by the kernel. The instance is associated with a process and consists of two lists, an interest list containing file descriptors the process wants to monitor and a ready list containing references to a subset of the interest list indicating while file descriptors are ready for I/O. A file descriptor is ready for I/O if an I/O call won't block the thread or process that calls it; for example, a file's or and HTTP request's data is in the kernel's buffer and can be immediately accessed with `read`, or the kernel's write buffer is ready to be written to with `write` to send data to a file or create an HTTP response. The catch with `epoll` is that it can only track file descriptors that implement the `.poll()` operation, which most normal files don't (i.e. CSVs, txt, etc). In the style of Linux, an epoll instance is itself a file descriptor.
+Epoll is an api provided by the linux OS. The main way a user interacts with it is through an epoll instance, which lives in memory and is entirely managed by the kernel. The instance is associated with a process and consists of two lists, an interest list containing file descriptors the process wants to monitor and a ready list containing references to a subset of the interest list indicating while file descriptors are ready for I/O. A file descriptor is ready for I/O if an I/O call won't block the thread or process that calls it; for example, a file's or and HTTP request's data is in the kernel's buffer and can be immediately accessed with `read`, or the kernel's write buffer is ready to be written to with `write` to send data to a file or create an HTTP response. The catch with `epoll` is that it can only track file descriptors that implement the `.poll()` operation, which most normal files don't (i.e. CSVs, txt, etc). In the style of Linux, an epoll instance is itself a file descriptor.
 
 ```C
 int epoll_fd = epoll_create1(EPOLL_CLOEXEC);//using CLOEXEC is defensive, incase other libraries use fork() + exec()
@@ -54,11 +54,11 @@ These workers need to coordinate so they do not try and carry out the same load 
 
 **Mutex**: short for mutual exclusion lock, as in, if one thread has the lock, no other threads can. It is an object in memory, a struct, that tracks whether a lock is owned, which thread has ownership of the lock, and which threads are waiting for the lock. The programmer is responsible for implementing this lock properly, such that a thread must ask for the lock (`pthread_mutex_lock()`) before executing a critical section of code, and releasing the lock when it is done (`pthread_mutex_unlock()`).
 
-**Condition Variable**: allows a thread to manage a condition (i.e. the state of an application), and to signal that condition to other threads waiting for it to become true. It is a struct that carries within it a linked list of handles for threads waiting for the condition to become true, and a sequence counter that tracks signals.
+**Condition Variable**: the primary purpose of a condition variable in this application is to coordinate waking and waiting among multiple threads. It does this by allowing the server thread to manage a condition (whether there is work to be done or not), and to signal that condition to worker threads waiting for it to become true (there is work to be done). It is a struct that carries within it a linked list of handles for threads waiting for the condition to become true, as well as other data to help prevent lost signals.
 
 Note the queues within mutexs and condition variables are managed by the OS kernel and pthread library, so they have no max limit besides that dictated by memory.
 
-In our server, two mutexs are created for work to be done and finished work, a condition variable is created for work to be done only (why?).
+In our server, mutexs are created for work to be done and for finished work. A condition variable is only created for work to be done. We do not create a conditoin variable for finished work becuase there is only one thread processing finished work, the server, and it already has its logic for when it waits and when it activates provided by epoll. 
 
 ```C
 //create work queue
@@ -80,11 +80,9 @@ pthread_t worker;
 pthread_create(&worker, NULL, worker_thread_func, NULL);
 ```
 
-`pthread_create()` will create a new thread in the same process that `app` is running in. This new thread runs the worker loop that will do blocking work, freeing up our server to continue to process requests. Since threads in a process share memory, both the app thread and the worker thread can access `work_queue` and `done_queue`. It is important to understand that the threads created by `pthread_create` are software abstractions, the number you create is not limited by hardware: they are not the same as the number of simultaneous instructions sets that can be executed by your machine, these are hardware threads. As a software abstraction, a `pthreads` thread is handled by the OS scheduler, and so if the scheduler notices that the thread is waiting, it will let another thread proceed until all of your hardware threads are executing a software thread or all remaining software threads are blocked.
+`pthread_create()` will create a new thread in the same process that `app` is running in. This new thread runs the worker loop that will do blocking work, freeing up our server to continue to process requests. Since threads in a process share memory, both the app thread and the worker thread can access `work_queue` and `done_queue`. It is important to understand that the threads created by `pthread_create` are software abstractions, the number you create is not limited by hardware: they are not the same as the number of simultaneous instructions sets that can be executed by your machine, these are hardware threads. As a software abstraction, a `pthreads` thread is handled by the OS scheduler, and so if the scheduler notices that the thread is waiting, it will let another thread proceed until all of your hardware threads are executing a software thread or all remaining software threads are blocked. In the context of multiple workers loading HTML for the server, the OS scheduler will process other work whenever it notices that a worker is waiting for hardware to deliver the data it requested from the disk to memory. So, if we create multiple worker threads, the OS scheduler can go on dispatching reads across those workers, and our server can more or less continuously process reading requests and writing responses without every waiting for I/O to finish.
 
-In a webserver, worker threads are often loading a lot of html, css, or javascript files to serve. Each one of these read operations blocks the thread that called it. So, if we create multiple worker threads, the OS scheduler can go on dispatching reads across those workers, and our server can serve the read data once its ready.
-
-2. Read Client request and enqueue work
+### Read Client request and enqueue work
 
 ```C
 char buf[512];
@@ -104,7 +102,7 @@ Work is added to the tail of the queue; the worker will process from the head. A
 
 Finally, the worker is signaled with `pthread_cond_signal`, which wakes up one worker.
 
-3. Worker loop processes job
+### Worker loop processes job
 
 ```C
 // Worker Thread Loop
@@ -119,10 +117,7 @@ void* worker_thread_func(void* arg) {
         work_head = (work_head + 1) % QUEUE_SIZE;
         pthread_mutex_unlock(&work_mutex);
 
-        // 2. Simulate heavy/blocking file I/O (e.g., reading disk)
-        usleep(100000); // 100ms artificial delay
-        snprintf(task.response_payload, sizeof(task.response_payload),
-                 "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!");
+	// Implement handler/callback pattern here?
 
         // 3. Push completed task to completed queue
         pthread_mutex_lock(&done_mutex);
@@ -189,10 +184,6 @@ Route routes[] = {
 
 The route table is an array of `Route`s. Each `Route` tells how to process a kind of request sent to a certain path, by specifying what handler is to be called.
 
-**Dispatch Loop**: the while loop that monitors the socket for client connections and requests, and brings responses from a route to the client connection.
+## Accepting client connections
 
-
-(how does eventfd come into play?)
-Why do we need both server and client connections to be non-blocking?
-what does EPOLLONESHOT do exactly?
-How should I pass routes into app now that I have worker threads?
+`EPOLLONESHOT` is used to make sure a client connection only triggers an epoll event once, when it first receives data. Epoll operates at the byte level, so it doesn't know what an HTTP request is. If multiple requests come in, and two epoll events fire, then two different worker threads might read parts of the first request. With `EPOLLONESHOT`, only one event fires, so only one worker handles all of the incoming data (at least, effectively, as long as HTTP/1.1 is used).
