@@ -188,6 +188,62 @@ The route table is an array of `Route`s. Each `Route` tells how to process a kin
 
 `EPOLLONESHOT` is used to make sure a client connection only triggers an epoll event once, when it first receives data. Epoll operates at the byte level, so it doesn't know what an HTTP request is. If multiple requests come in, and two epoll events fire, then two different worker threads might read parts of the first request. With `EPOLLONESHOT`, only one event fires, so only one worker handles all of the incoming data (at least, effectively, as long as HTTP/1.1 is used).
 
-## debug
+## Concurrency and Parallelism
 
-Right now, epoll just puts client fds on the ready list when they have data that can be read. It should block everytime there is no data to be read from the server, client, or eventfd.
+How many worker threads should be created? We need to consider memory and compute. Let's start with compute.
+
+```shell
+deploy@ubuntu:~/dev/ipa-website$ lscpu | grep Thread -A 2
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+```
+
+For the moment, let's take software threads as our fundamental unit of computation, representing a stream of instructions operating on data. The number of physical cores represents the number of threads we can have truly executing in parallel. On my machine, we can have two. Beyond two, the CPU starts to use simultaneous multithreading (SMT). In this computation regime, the CPU takes advantage of the multiple execution units available in each core: some assembly instructions have two (or more) execution units, meaning that a single core can execute the same instruction twice, in parallel. If a thread is not using all the execution units of the instruction it happens to be carrying out, SMT allows another thread to utilize the other execution units. The number of threads per core on my machine that SMT can interleave in such a way is 2. Across a program, threads often use all available execution units, so a typical speed increase per thread executed with SMT is only 15-30%. In total, accross the parallel execution of the cores and SMT, my machine will typically get performance boosts of 130-160% when using four threads compared to one (100% for the first thread utilizing the second core, 15-30% for each thread utilizing the SMT hardware threads of each core).
+
+A rule-of-thumb for the number of software thread to create for a completely CPU-bound task is
+
+$$
+N_{\text{software threads}} = N_{\text{cores}} * N_{\text{hardware threads per core}} \equiv N_{\text{logical cores}},
+$$
+
+where we define logical cores as the number of threads that can be executed in "parallel" via SMT.
+
+On my webserver, we are more often I/O-bound that compute bound. This means that we can gain more performance from adding more software threads because many of the software threads will spend a lot of time (relatively speaking) waiting for data to be served to them by the OS, either from a client or a server connection via a socket, or from a file. And they are literally waiting: such I/O operations have dedicated hardware for each of file I/O and network I/O, meaning that the computation involved with gathering data from storage or a socket is completely separate from what the CPU is doing, so any software thread waiting for an I/O operation is not performing any computation. If a pysical core gets blocked by a waiting thread, it is not performing any computation, and we are wasting CPU cycles. The entire point of creating an asynchronous server is to prevent a CPU core from ever sitting idle because it is waiting on some operation being carried out elsewhere in its machine. 
+
+Despite being I/O-bound more often, we still want to have our logical cores executing as often as possible, so a rule of thumb for the number of software threads to create for I/O-bound tasks builds on the above rule of thumb for CPU-bound tasks, adding a term
+
+$$
+N_{\text{software threads}} = N_{\text{logical cores}} + N_{\text{logical cores}} \frac{\text{wait time}}{\text{compute time}}
+$$
+
+This extra term manifests the concept of balancing latency, the time spent waiting for data, and reciprocal throughput, how fast on the data completes. Assume that each software thread is executing a stream of instructions that after some initialization involves a logical core repeatedly waiting 1 second for data to load and then spending another second performing a computation on that data. Let's also assume that SMT is working perfectly and all logical cores can execute in parallel while running these software threads. If we create 4 software threads, then after the initializations every other second the CPU is completely idle, because during the second of wait time each thread is waiting for other hardware to do something. If we create 5, then every other second 75% of the CPU is idle, because when first first 4 software threads to execute wait for the data to load, the CPU can work on the 5th thread's data. For the CPU to never be idle, we need 8 software threads, four to execute computation while four wait for data to load.
+
+Now, let's assume that wait time doubled to 2 seconds. In this case with four software threads the entire CPU is idled two out of every three seconds, and we need 12 software threads for the CPU to never be idle. Or we can assume that compute time halves to half a second. In this case the CPU is idle for one second out of every 1.5, which is equivalent to 2 out of three, so we again need 12 software threads for the CPU to never idle.
+
+Note that in all of these cases, no software thread is waiting longer than its I/O wait time to begin computation again. This is because they all assume the best case scenario of perfect parallelism of logical cores when executing the software threads. In reality, SMT will interleave execution of the logical cores, causing the computation of one software thread to take longer than it would if it was running by itself. This overhead gets added to the I/O wait time. So, if we follow this rule of thumb our CPU will never be idle, but some software threads will wait longer than the I/O wait time to begin computation. We should still follow it, however, because it maximizes the *potential* speed at which our application can run.
+
+Memory adds a further constraint. The total memory used by a multi-threaded application like the one we have been describing needs to be below the total memory avaiable. On my machine this is currently 5.9 GB. 
+
+```shell
+deploy@ubuntu:~/dev/ipa-website$ free --mega
+               total        used        free      shared  buff/cache   available
+Mem:            8277        1276        5854           1        1440        7001
+Swap:              0           0           0
+```
+
+This means that the memory used by each software thread (i.e. the size of the data it loads and performs a computation on), needs to be less than
+
+$$
+\text{max memory per logical core} = \frac{\text{free memory}}{N_{software threads}}
+$$
+
+So, a unified rule of thumb for the number of software threads to create is
+
+$$
+N_{\text{software threads}} = \min \left( \ N_{\text{logical cores}} + N_{\text{logical cores}} \frac{\text{wait time}}{\text{compute time}}, \frac{\text{free memory}}{\text{max memory per logical core}} \right).
+$$
+
+Here we can see why making an HTTP server asynchronous is such an upgrade: the data being loaded is typically small HTML files, on the order of a few KB so memory is typically not the binding constraint. Depending on the web server and application, the wait time and compute time involved in responding to the client may very greatly, given the files could turn out to be images or other files much larger than a few KB, and the computation could be very expensive.
+
+In the case of my web server, we will have one logical core taken up by the dipatch loop reading requests and writing responses, and the rest by worker threads parsing requests, computing how to respond, and parsing the response to be written. This means that the compute and wait times we need to consider are that of the worker threads, not the dispatch loop.

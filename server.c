@@ -10,6 +10,8 @@
 #include <pthread.h>
 #include <sys/eventfd.h>
 #include <fcntl.h>
+#include <time.h>
+#include <stdbool.h>
 
 #include "server.h"
 
@@ -28,12 +30,21 @@ int notify_fd; //eventfd handle
 
 //worker thread loop
 void* worker_thread_func(void* arg) {
+	//struct timespec	start = {0}, end = {0}, handler_start, handler_end;
+	//double elapsed, handler_elapsed;
 	while (1) {
+
 		//fetch a task to be done
 		pthread_mutex_lock(&work_mutex);
+		//if (start.tv_nsec || start.tv_sec) {
+		//	clock_gettime(CLOCK_MONOTONIC, &end);
+		//	elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec)/1e9;
+		//	printf("Elapsed worker time: %0.6f seconds\n", elapsed);
+		//}
 		while (work_head == work_tail) { //while loop to prevent spurious wakes
 			pthread_cond_wait(&work_cond, &work_mutex);
 		}
+		//clock_gettime(CLOCK_MONOTONIC, &start);
 		task_t task = work_queue[work_head];
 		work_head = (work_head + 1) % QUEUE_SIZE;
 		pthread_mutex_unlock(&work_mutex);
@@ -57,8 +68,10 @@ void* worker_thread_func(void* arg) {
 			++ptr;
 		}
 		++ptr;
+		bool end_of_path_found = false;
 		for (int i = 0; *ptr != ' ' && i < MAX_PATH_LEN -1; ++i) {
-			req.path[i] = *ptr;
+			if (*ptr == '?' || *ptr == '#') end_of_path_found = true;
+			if (!end_of_path_found) req.path[i] = *ptr;
 			++ptr;
 		}
 		++ptr;
@@ -108,7 +121,11 @@ void* worker_thread_func(void* arg) {
 		matching_done:
 		//create response
 		//500 error handling: from here on, if error then we fucked up.
+		//clock_gettime(CLOCK_MONOTONIC, &handler_start);
 		handler(&req, &res);
+		//clock_gettime(CLOCK_MONOTONIC, &handler_end);
+		//handler_elapsed = (handler_end.tv_sec - handler_start.tv_sec) + (handler_end.tv_nsec - handler_start.tv_nsec)/1e9;
+		//printf("Elapsed handler time: %0.6f seconds\n", handler_elapsed);
 
 		skip_handler_because_of_error:
 		//malloc for parsed response
@@ -192,7 +209,6 @@ void* worker_thread_func(void* arg) {
 static int set_nonblocking(int fd) {
 	int flags = fcntl(fd, F_GETFL);
 	if (flags == -1) return -1;
-	printf("flags: %b", flags);
 	return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
@@ -201,8 +217,10 @@ void app(const app_init_t *app_init) {
 	notify_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC); //using CLOEXEC is defensive, incase other libraries use fork() + exec()
 
 	//start worker thread(s)
-	pthread_t worker;
-	pthread_create(&worker, NULL, worker_thread_func, &app_init);
+	pthread_t workers[NUM_WORKER_THREADS];
+	for (int i = 0; i < NUM_WORKER_THREADS; ++i) {
+		pthread_create(&workers[i], NULL, worker_thread_func, &app_init);
+	}
 
 	//create socket
 	int server_fd = socket(

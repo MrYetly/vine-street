@@ -14,6 +14,7 @@
 #define MAX_PHRASE_LEN 32
 #define HTTP_VERSION "HTTP/1.1"
 #define QUEUE_SIZE 128
+#define NUM_WORKER_THREADS 7
 
 typedef struct {
 	char key[MAX_HEADER_KEY_LEN];
