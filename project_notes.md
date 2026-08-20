@@ -187,3 +187,7 @@ The route table is an array of `Route`s. Each `Route` tells how to process a kin
 ## Accepting client connections
 
 `EPOLLONESHOT` is used to make sure a client connection only triggers an epoll event once, when it first receives data. Epoll operates at the byte level, so it doesn't know what an HTTP request is. If multiple requests come in, and two epoll events fire, then two different worker threads might read parts of the first request. With `EPOLLONESHOT`, only one event fires, so only one worker handles all of the incoming data (at least, effectively, as long as HTTP/1.1 is used).
+
+## debug
+
+Right now, epoll just puts client fds on the ready list when they have data that can be read. It should block everytime there is no data to be read from the server, client, or eventfd.

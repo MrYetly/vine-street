@@ -51,10 +51,10 @@ typedef struct {
 	size_t route_count;
 } app_init_t;
 
-void app(const *app_init_t);
+void app(const app_init_t *app_init);
 
 //task structure passed between threads
-typdef struct{
+typedef struct {
 	int client_fd;
 	char req_buffer[BUFFER_SIZE];
 	void *parsed_res;

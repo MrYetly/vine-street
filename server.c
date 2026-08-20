@@ -1,168 +1,3 @@
-//epoll + worker thread pool + eventfd
-//#include <stdio.h>
-//#include <stdlib.h>
-//#include <string.h>
-//#include <unistd.h>
-//#include <fcntl.h>
-//#include <errno.h>
-//#include <pthread.h>
-//#include <sys/epoll.h>
-//#include <sys/eventfd.h>
-//#include <sys/socket.h>
-//#include <netinet/in.h>
-//
-//#define PORT 8080
-//#define MAX_EVENTS 10
-//#define QUEUE_SIZE 100
-//
-//// Task structure passed between threads
-//typedef struct {
-//    int client_fd;
-//    char response_payload[128];
-//} Task;
-//
-//// Work queue (Main Thread -> Worker Pool)
-//Task work_queue[QUEUE_SIZE];
-//int work_head = 0, work_tail = 0;
-//pthread_mutex_t work_mutex = PTHREAD_MUTEX_INITIALIZER;
-//pthread_cond_t work_cond = PTHREAD_COND_INITIALIZER;
-//
-//// Completed queue (Worker Pool -> Main Thread)
-//Task done_queue[QUEUE_SIZE];
-//int done_head = 0, done_tail = 0;
-//pthread_mutex_t done_mutex = PTHREAD_MUTEX_INITIALIZER;
-//
-//int notify_fd; // eventfd handle
-//
-//// Helper to make sockets non-blocking
-//void set_nonblocking(int fd) {
-//    int flags = fcntl(fd, F_GETFL, 0);
-//    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-//}
-//
-//// Worker Thread Loop
-//void* worker_thread_func(void* arg) {
-//    while (1) {
-//        // 1. Fetch work task from queue
-//        pthread_mutex_lock(&work_mutex);
-//        while (work_head == work_tail) {
-//            pthread_cond_wait(&work_cond, &work_mutex);
-//        }
-//        Task task = work_queue[work_head];
-//        work_head = (work_head + 1) % QUEUE_SIZE;
-//        pthread_mutex_unlock(&work_mutex);
-//
-//        // 2. Simulate heavy/blocking file I/O (e.g., reading disk)
-//        usleep(100000); // 100ms artificial delay
-//        snprintf(task.response_payload, sizeof(task.response_payload),
-//                 "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!");
-//
-//        // 3. Push completed task to completed queue
-//        pthread_mutex_lock(&done_mutex);
-//        done_queue[done_tail] = task;
-//        done_tail = (done_tail + 1) % QUEUE_SIZE;
-//        pthread_mutex_unlock(&done_mutex);
-//
-//        // 4. Signal main thread via eventfd
-//        uint64_t signal_val = 1;
-//        eventfd_write(notify_fd, signal_val);
-//    }
-//    return NULL;
-//}
-//
-//int main() {
-//    int listen_fd, epfd;
-//    struct sockaddr_in addr;
-//    struct epoll_event ev, events[MAX_EVENTS];
-//
-//    // --- STEP 1: Set up eventfd ---
-//    notify_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-//
-//    // --- STEP 2: Create worker thread pool ---
-//    pthread_t worker;
-//    pthread_create(&worker, NULL, worker_thread_func, NULL);
-//
-//    // --- STEP 3: Create non-blocking server socket ---
-//    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-//    int opt = 1;
-//    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-//    set_nonblocking(listen_fd);
-//
-//    addr.sin_family = AF_INET;
-//    addr.sin_addr.s_addr = INADDR_ANY;
-//    addr.sin_port = htons(PORT);
-//    bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr));
-//    listen(listen_fd, SOMAXCONN);
-//
-//    // --- STEP 4: Initialize epoll and add descriptors ---
-//    epfd = epoll_create1(EPOLL_CLOEXEC);
-//
-//    // Add server socket
-//    ev.events = EPOLLIN;
-//    ev.data.fd = listen_fd;
-//    epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
-//
-//    // Add eventfd descriptor
-//    ev.events = EPOLLIN;
-//    ev.data.fd = notify_fd;
-//    epoll_ctl(epfd, EPOLL_CTL_ADD, notify_fd, &ev);
-//
-//    printf("Server listening on port %d...\n", PORT);
-//
-//    // --- STEP 5: Main Event Loop ---
-//    while (1) {
-//        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
-//
-//        for (int i = 0; i < nfds; i++) {
-//            int fd = events[i].data.fd;
-//
-//            // CASE A: New client connection
-//            if (fd == listen_fd) {
-//                int client_fd = accept(listen_fd, NULL, NULL);
-//                if (client_fd > 0) {
-//                    set_nonblocking(client_fd);
-//                    ev.events = EPOLLIN | EPOLLONESHOT; // ONESHOT to prevent multi-thread race
-//                    ev.data.fd = client_fd;
-//                    epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &ev);
-//                }
-//            }
-//            // CASE B: Worker thread signaled completed I/O via eventfd
-//            else if (fd == notify_fd) {
-//                eventfd_t val;
-//                eventfd_read(notify_fd, &val); // Clear eventfd state
-//
-//                // Drain completed tasks
-//                pthread_mutex_lock(&done_mutex);
-//                while (done_head != done_tail) {
-//                    Task completed_task = done_queue[done_head];
-//                    done_head = (done_head + 1) % QUEUE_SIZE;
-//
-//                    // Main thread writes final HTTP response to client socket
-//                    write(completed_task.client_fd, completed_task.response_payload,
-//                          strlen(completed_task.response_payload));
-//
-//                    // Close client socket
-//                    epoll_ctl(epfd, EPOLL_CTL_DEL, completed_task.client_fd, NULL);
-//                    close(completed_task.client_fd);
-//                }
-//                pthread_mutex_unlock(&done_mutex);
-//            }
-//            // CASE C: Client socket ready to read
-//            else {
-//                char buf[512];
-//                read(fd, buf, sizeof(buf)); // Read HTTP request
-//
-//                // Offload disk task to worker thread pool
-//                pthread_mutex_lock(&work_mutex);
-//                work_queue[work_tail].client_fd = fd;
-//                work_tail = (work_tail + 1) % QUEUE_SIZE;
-//                pthread_cond_signal(&work_cond);
-//                pthread_mutex_unlock(&work_mutex);
-//            }
-//        }
-//    }
-//    return 0;
-//}
 #include <sys/socket.h>
 #include <stdio.h>
 #include <netinet/in.h>
@@ -172,6 +7,9 @@
 #include <string.h>
 #include <assert.h>
 #include <sys/epoll.h>
+#include <pthread.h>
+#include <sys/eventfd.h>
+#include <fcntl.h>
 
 #include "server.h"
 
@@ -196,13 +34,13 @@ void* worker_thread_func(void* arg) {
 		while (work_head == work_tail) { //while loop to prevent spurious wakes
 			pthread_cond_wait(&work_cond, &work_mutex);
 		}
-		task_t task = work_queue[head];
+		task_t task = work_queue[work_head];
 		work_head = (work_head + 1) % QUEUE_SIZE;
 		pthread_mutex_unlock(&work_mutex);
 
 		//400 error handling: if error, there's something wrong with the user's request
-		route_t *routes = (app_init_t *)arg->routes;
-		size_t route_count = (app_init_t *)arg->route_count;
+		route_t *routes = ((app_init_t *)*(intptr_t *)arg)->routes;
+		size_t route_count = ((app_init_t *)*(intptr_t *)arg)->route_count;
 		char *ptr = task.req_buffer;
 		http_request_t req = {0};
 		char *parsed_res = NULL;
@@ -327,7 +165,7 @@ void* worker_thread_func(void* arg) {
 		task.parsed_res_size = parsed_res_size;
 		goto done;
 
-		parse_response_error:
+		response_parse_error:
 			perror("Response parse error");
 			char *response_parse_error_response = 
 				"HTTP/1.1 500 But why male models?\r\n"
@@ -335,7 +173,7 @@ void* worker_thread_func(void* arg) {
 				"Connection: close\r\n"
 				"\r\n";
 			task.parsed_res = response_parse_error_response;
-			task.parse_res_size = strlen(response_parse_error_response);
+			task.parsed_res_size = strlen(response_parse_error_response);
 			goto done;
 
 		done:
@@ -344,7 +182,9 @@ void* worker_thread_func(void* arg) {
 			done_tail = (done_tail +1) % QUEUE_SIZE;
 			pthread_mutex_unlock(&done_mutex);
 			uint64_t signal_val = 1;
-			eventfd_write(notify_fd, signal_val);
+			if (eventfd_write(notify_fd, signal_val) < 0) {
+				perror("eventfd_write");
+			}
 	}
 	return NULL;
 }
@@ -356,13 +196,13 @@ static int set_nonblocking(int fd) {
 	return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void app(const *app_init_t) {
+void app(const app_init_t *app_init) {
 	//start eventfd for epoll to track
 	notify_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC); //using CLOEXEC is defensive, incase other libraries use fork() + exec()
 
 	//start worker thread(s)
 	pthread_t worker;
-	pthread_create(&worker, NULL, worker_thread_func, app_init_t);
+	pthread_create(&worker, NULL, worker_thread_func, &app_init);
 
 	//create socket
 	int server_fd = socket(
@@ -382,6 +222,7 @@ void app(const *app_init_t) {
 	if (set_nonblocking(server_fd) < 0) {
 		perror("Failed to set socket as nonblocking");
 		exit(EXIT_FAILURE);
+	}
 	struct sockaddr_in address = {
 		.sin_family = AF_INET,
 		.sin_addr.s_addr = htonl(ADDRESS),
@@ -399,11 +240,19 @@ void app(const *app_init_t) {
 	//start epoll
 	int epoll_fd = epoll_create1(EPOLL_CLOEXEC);//using CLOEXEC is defensive, incase other libraries use fork() + exec()
 
+	//register server_fd with epoll
 	struct epoll_event ev = {
 		.events = EPOLLIN,
-		.data.fd = server_df,
+		.data.fd = server_fd,
 	};
 	epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev);
+
+	//register notify_fd with epoll
+	ev = (struct epoll_event){
+		.events = EPOLLIN,
+		.data.fd = notify_fd,
+	};
+	epoll_ctl(epoll_fd, EPOLL_CTL_ADD, notify_fd, &ev);
 
 	char buffer[BUFFER_SIZE];
 	ssize_t bytes_read;
@@ -417,7 +266,7 @@ void app(const *app_init_t) {
 			if (fd == server_fd) {
 				int client_fd = accept(server_fd, NULL, NULL);
 				if (client_fd < 0) {
-					perror("Socket error");
+					perror("Socket error, accept");
 					continue;
 				} else {
 					set_nonblocking(client_fd);
@@ -433,21 +282,21 @@ void app(const *app_init_t) {
 				pthread_mutex_lock(&done_mutex);
 				while (done_head != done_tail) {
 					task_t task = done_queue[done_head];
-					done_head = (done_head + 1) & QUEUE_SIZE;
+					done_head = (done_head + 1) % QUEUE_SIZE;
 
 					ssize_t bytes_written = write(task.client_fd, task.parsed_res, task.parsed_res_size);
 					if (bytes_written < 0) {
-						perror("Socket error");
+						perror("Socket error, write");
 					}
 
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task.client_fd, NULL);
-					close(task.task_fd);
+					close(task.client_fd);
 				}
 				pthread_mutex_unlock(&done_mutex);
 			} else {
 				bytes_read = read(fd, buffer, BUFFER_SIZE-1);
 				if (bytes_read < 0) {
-					perror("Socket error");
+					perror("Socket error, read");
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
 					close(fd);
 					continue;
@@ -457,169 +306,14 @@ void app(const *app_init_t) {
 				pthread_mutex_lock(&work_mutex);
 
 				work_queue[work_tail].client_fd = fd;
-				snprintf(work_queue[work_tail].req_buffer, BUFFER_SIZE, buffer);
+				snprintf(work_queue[work_tail].req_buffer, BUFFER_SIZE, "%s", buffer);
 
-				work_tail = (work_tail +1) % work_tail;
+				work_tail = (work_tail +1) % QUEUE_SIZE;
 
 				pthread_cond_signal(&work_cond);
 
 				pthread_mutex_unlock(&work_mutex);
 			}
 		}
-
-
-//		int client_fd = 0;
-//		//errors handled internally: if accept or read fail, the socket is broken and no reponse can be sent
-//		client_fd = accept(server_fd, NULL, NULL); //the client connection is a file. this gets its file descriptor
-//		if (client_fd < 0) {
-//			goto socket_error;
-//		}
-//
-//		bytes_read = read(client_fd, buffer, sizeof(buffer)-1);
-//		if (bytes_read < 0) {
-//			goto socket_error;
-//		}
-//		buffer[bytes_read]='\0';
-//
-//		//400 error handling: if error, there's something wrong with the user's request
-//		char *ptr = buffer;
-//		http_request_t req = {0};
-//		char *parsed_res = NULL;
-//		http_response_t res = {
-//			.version = HTTP_VERSION,
-//			.headers[0].key = "Connection",
-//			.headers[0].val = "close",
-//			.next_header_idx = 1,
-//		};
-//
-//		//parse request line
-//		for (int i = 0; *ptr != ' ' && i < MAX_METHOD_LEN - 1; ++i) {
-//			req.method[i] = *ptr;
-//			++ptr;
-//		}
-//		++ptr;
-//		for (int i = 0; *ptr != ' ' && i < MAX_PATH_LEN -1; ++i) {
-//			req.path[i] = *ptr;
-//			++ptr;
-//		}
-//		++ptr;
-//		for (int i = 0; *ptr != '\n' && i < MAX_VERSION_LEN -1; ++i) {
-//			if (*ptr != '\r') {
-//				req.version[i] = *ptr;
-//			}
-//			++ptr;
-//		}
-//		++ptr;
-//
-//		//parse headers
-//
-//		//parse body
-//
-//
-//		//very naive matching process, may need to improve later
-//		http_handler_t handler;
-//		for (int i = 0; i < route_count; ++i) {
-//			if (strcmp(req.path, (routes + i)->path) == 0) {
-//				goto path_matched;
-//			}
-//		}
-//		res.status_code = 404;
-//		snprintf(res.reason_phrase, MAX_PHRASE_LEN, "Not Found");
-//		snprintf(res.headers[res.next_header_idx].key, MAX_HEADER_KEY_LEN, "Content-Length");
-//		snprintf(res.headers[res.next_header_idx].val, MAX_HEADER_VAL_LEN, "0");
-//		++res.next_header_idx;
-//		goto skip_handler_because_of_error;
-//
-//		path_matched:
-//		for (int i=0; i< route_count; ++i) {
-//			if (strcmp(req.path, (routes + i)->path) == 0) {
-//				if (strcmp(req.method, (routes + i)->method) == 0) {
-//					handler = (routes + i)->handler;
-//					goto matching_done;
-//				}
-//			}
-//		}
-//		res.status_code = 405;
-//		snprintf(res.reason_phrase, MAX_PHRASE_LEN, "Method Not Allowed");
-//		snprintf(res.headers[res.next_header_idx].key, MAX_HEADER_KEY_LEN, "Content-Length");
-//		snprintf(res.headers[res.next_header_idx].val, MAX_HEADER_VAL_LEN, "0");
-//		++res.next_header_idx;
-//		goto skip_handler_because_of_error;
-//
-//		matching_done:
-//		//create response
-//		//500 error handling: from here on, if error then we fucked up.
-//		handler(&req, &res);
-//
-//		skip_handler_because_of_error:
-//		//malloc for parsed response
-//		size_t res_header_strlen =	strlen(res.version) + 1
-//					+ 3 + 1 //status code
-//					+ strlen(res.reason_phrase)
-//					+ 2; //CRLF
-//		for (int i = 0; i < MAX_HEADERS && res.headers[i].key[0] != '\0'; i++) {
-//			res_header_strlen += 	strlen(res.headers[i].key)
-//						+ 2 //colon and space
-//						+ strlen(res.headers[i].val)
-//						+ 2; //CRLF
-//		}
-//		res_header_strlen += 2; //second CRLF in a row, marking end of headers
-//		size_t res_header_size = res_header_strlen + 1;
-//		size_t parsed_res_size = res_header_strlen + res.body_size;
-//		parsed_res = malloc(parsed_res_size + 1); //leave room for null terminator incase body is text and we need to print
-//		if (!parsed_res) goto response_parse_error;
-//		parsed_res[parsed_res_size] = '\0';
-//
-//		//parse response
-//		//write version, status, and reason phrase line
-//		int char_entered = snprintf(
-//				parsed_res,
-//				res_header_size,
-//				"%s %d %s\r\n",
-//				res.version,
-//				res.status_code,
-//				res.reason_phrase);
-//		if (char_entered < 0) goto response_parse_error;
-//		size_t offset = (size_t) char_entered;
-//
-//		//write headers
-//		for (int i = 0; i < MAX_HEADERS && res.headers[i].key[0] != '\0'; ++i) {
-//			char_entered = snprintf(
-//					parsed_res + offset,
-//					res_header_size - offset,
-//					"%s: %s\r\n",
-//					res.headers[i].key,
-//					res.headers[i].val);
-//			if (char_entered <0) goto response_parse_error;
-//			offset += (size_t) char_entered;
-//		}
-//		char_entered = snprintf(parsed_res + offset, res_header_size - offset,  "\r\n");
-//		if (char_entered < 0) goto response_parse_error;
-//		offset += (size_t) char_entered;
-//		assert(strlen(parsed_res) == res_header_strlen);
-//
-//		//write body
-//		if (res.body) memcpy(parsed_res + offset, res.body, res.body_size);
-//
-//		//send response
-//		write(client_fd, parsed_res, parsed_res_size);
-//		goto cleanup;
-//
-//		response_parse_error:
-//			perror("Response parse error");
-//			const char *response_parse_error_response = 
-//				"HTTP/1.1 500 But why male models?\r\n"
-//				"Context-Length: 0\r\n"
-//				"Connection: close\r\n"
-//				"\r\n";
-//			write(client_fd, response_parse_error_response, strlen(response_parse_error_response));
-//			goto cleanup;
-//		socket_error:
-//			perror("Socket error");
-//			goto cleanup;
-//		cleanup:
-//			if (parsed_res) free(parsed_res);
-//			if (client_fd) close(client_fd);
-//			continue;
 	}
 }
