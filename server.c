@@ -183,7 +183,7 @@ void* worker_thread_func(void* arg) {
 		goto done;
 
 		response_parse_error:
-			perror("Response parse error");
+			perror("\nResponse parse error");
 			char *response_parse_error_response = 
 				"HTTP/1.1 500 But why male models?\r\n"
 				"Context-Length: 0\r\n"
@@ -200,7 +200,7 @@ void* worker_thread_func(void* arg) {
 			pthread_mutex_unlock(&done_mutex);
 			uint64_t signal_val = 1;
 			if (eventfd_write(notify_fd, signal_val) < 0) {
-				perror("eventfd_write");
+				perror("\neventfd_write");
 			}
 	}
 	return NULL;
@@ -229,16 +229,16 @@ void app(const app_init_t *app_init) {
 			0 //choose most common configuration given prev. args
 			);
 	if (server_fd < 0) {
-		perror("Socket creation failed");
+		perror("\nSocket creation failed");
 		exit(EXIT_FAILURE);
 	}
 	int enable = 1;
 	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
-		perror("setsockopt(SO_REUSEADDR) failed");
+		perror("\nsetsockopt(SO_REUSEADDR) failed");
 		exit(EXIT_FAILURE);
 	}
 	if (set_nonblocking(server_fd) < 0) {
-		perror("Failed to set socket as nonblocking");
+		perror("\nFailed to set socket as nonblocking");
 		exit(EXIT_FAILURE);
 	}
 	struct sockaddr_in address = {
@@ -247,11 +247,11 @@ void app(const app_init_t *app_init) {
 		.sin_port = htons(PORT)
 	};
 	if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-		perror("bind failed");
+		perror("\nbind failed");
 		exit(EXIT_FAILURE);
 	}
 	if (listen(server_fd, SOMAXCONN) < 0) {
-		perror("Failed to set socket status to listen");
+		perror("\nFailed to set socket status to listen");
 		exit(EXIT_FAILURE);
 	}
 
@@ -284,7 +284,7 @@ void app(const app_init_t *app_init) {
 			if (fd == server_fd) {
 				int client_fd = accept(server_fd, NULL, NULL);
 				if (client_fd < 0) {
-					perror("Socket error, accept");
+					perror("\nSocket error, accept");
 					continue;
 				} else {
 					set_nonblocking(client_fd);
@@ -304,7 +304,7 @@ void app(const app_init_t *app_init) {
 
 					ssize_t bytes_written = write(task.client_fd, task.parsed_res, task.parsed_res_size);
 					if (bytes_written < 0) {
-						perror("Socket error, write");
+						perror("\nSocket error, write");
 					}
 
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task.client_fd, NULL);
@@ -314,7 +314,7 @@ void app(const app_init_t *app_init) {
 			} else {
 				bytes_read = read(fd, buffer, BUFFER_SIZE-1);
 				if (bytes_read < 0) {
-					perror("Socket error, read");
+					perror("\nSocket error, read");
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
 					close(fd);
 					continue;
