@@ -84,6 +84,46 @@ void* worker_thread_func(void* arg) {
 		++ptr;
 
 		//parse headers
+		while (!(*ptr == '\r' && *(ptr + 1) == '\n')) {
+			if (req.next_header_idx >= MAX_HEADERS) {
+				res.status_code = 400;
+				snprintf(res.reason_phrase, MAX_PHRASE_LEN, "Bad Request");
+				snprintf(res.headers[res.next_header_idx].key, MAX_HEADER_KEY_LEN, "Content-Length");
+				snprintf(res.headers[res.next_header_idx].val, MAX_HEADER_VAL_LEN, "0");
+				++res.next_header_idx;
+				goto skip_handler_because_of_error;
+			}
+
+			int i = 0;
+			while (*ptr != ':' && *ptr != '\r' && *ptr != '\n' && i < MAX_HEADER_KEY_LEN - 1) {
+				req.headers[req.next_header_idx].key[i++] = *ptr++;
+			}
+			req.headers[req.next_header_idx].key[i] = '\0';
+
+			if (*ptr != ':') {
+				res.status_code = 400;
+				snprintf(res.reason_phrase, MAX_PHRASE_LEN, "Bad Request");
+				snprintf(res.headers[res.next_header_idx].key, MAX_HEADER_KEY_LEN, "Content-Length");
+				snprintf(res.headers[res.next_header_idx].val, MAX_HEADER_VAL_LEN, "0");
+				++res.next_header_idx;
+				goto skip_handler_because_of_error;
+			}
+			++ptr; // skip ':'
+
+			while (*ptr == ' ') ++ptr; // skip spaces after colon
+
+			i = 0;
+			while (*ptr != '\r' && *ptr != '\n' && i < MAX_HEADER_VAL_LEN - 1) {
+				req.headers[req.next_header_idx].val[i++] = *ptr++;
+			}
+			req.headers[req.next_header_idx].val[i] = '\0';
+
+			if (*ptr == '\r') ++ptr;
+			if (*ptr == '\n') ++ptr;
+
+			++req.next_header_idx;
+		}
+		ptr += 2; // skip final \r\n
 
 		//parse body
 
@@ -176,6 +216,7 @@ void* worker_thread_func(void* arg) {
 
 		//write body
 		if (res.body) memcpy(parsed_res + offset, res.body, res.body_size);
+		free(res.body);
 
 		//write to task
 		task.parsed_res = parsed_res;
@@ -306,6 +347,7 @@ void app(const app_init_t *app_init) {
 					if (bytes_written < 0) {
 						perror("\nSocket error, write");
 					}
+					free(task.parsed_res);
 
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task.client_fd, NULL);
 					close(task.client_fd);

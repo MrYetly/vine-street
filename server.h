@@ -25,7 +25,8 @@ typedef struct {
 	char method[MAX_METHOD_LEN];
 	char path[MAX_PATH_LEN];
 	char version[MAX_VERSION_LEN];
-	//need to parse headers eventually
+	http_header_t headers[MAX_HEADERS];
+	int next_header_idx;
 } http_request_t;
 
 typedef struct {
