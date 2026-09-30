@@ -1,7 +1,8 @@
 #include <netinet/in.h>
 #include <stddef.h>
+#include <stdbool.h>
 
-#define PORT 1362
+#define PORT 8999
 #define ADDRESS INADDR_LOOPBACK
 #define BUFFER_SIZE 4096
 #define MAX_EVENTS 10
@@ -51,6 +52,7 @@ typedef struct {
 typedef struct {
 	route_t *routes;
 	size_t route_count;
+	int port;
 } app_init_t;
 
 void app(const app_init_t *app_init);
@@ -61,5 +63,6 @@ typedef struct {
 	char req_buffer[BUFFER_SIZE];
 	void *parsed_res;
 	size_t parsed_res_size;
+	bool parsed_res_needs_free;
 } task_t;
 

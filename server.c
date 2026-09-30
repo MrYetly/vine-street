@@ -55,6 +55,7 @@ void* worker_thread_func(void* arg) {
 		char *ptr = task.req_buffer;
 		http_request_t req = {0};
 		char *parsed_res = NULL;
+		bool parsed_res_needs_free = false;
 		http_response_t res = {
 			.version = HTTP_VERSION,
 			.headers[0].key = "Connection",
@@ -184,6 +185,7 @@ void* worker_thread_func(void* arg) {
 		size_t parsed_res_size = res_header_strlen + res.body_size;
 		parsed_res = malloc(parsed_res_size + 1); //leave room for null terminator incase body is text and we need to print
 		if (!parsed_res) goto response_parse_error;
+		parsed_res_needs_free = true;
 		parsed_res[parsed_res_size] = '\0';
 
 		//parse response
@@ -225,6 +227,11 @@ void* worker_thread_func(void* arg) {
 
 		response_parse_error:
 			perror("\nResponse parse error");
+			if (parsed_res_needs_free) {
+				free(parsed_res);
+				parsed_res_needs_free = false;
+			}
+			free(res.body);
 			char *response_parse_error_response = 
 				"HTTP/1.1 500 But why male models?\r\n"
 				"Context-Length: 0\r\n"
@@ -235,13 +242,22 @@ void* worker_thread_func(void* arg) {
 			goto done;
 
 		done:
+			task.parsed_res_needs_free = parsed_res_needs_free;
 			pthread_mutex_lock(&done_mutex);
-			done_queue[done_tail] = task;
-			done_tail = (done_tail +1) % QUEUE_SIZE;
-			pthread_mutex_unlock(&done_mutex);
-			uint64_t signal_val = 1;
-			if (eventfd_write(notify_fd, signal_val) < 0) {
-				perror("\neventfd_write");
+			if ((done_tail + 1) % QUEUE_SIZE == done_head) {
+				pthread_mutex_unlock(&done_mutex);
+				if (task.parsed_res_needs_free) {
+					free(task.parsed_res);
+				}
+				close(task.client_fd);
+			} else {
+				done_queue[done_tail] = task;
+				done_tail = (done_tail + 1) % QUEUE_SIZE;
+				pthread_mutex_unlock(&done_mutex);
+				uint64_t signal_val = 1;
+				if (eventfd_write(notify_fd, signal_val) < 0) {
+					perror("\neventfd_write");
+				}
 			}
 	}
 	return NULL;
@@ -285,7 +301,7 @@ void app(const app_init_t *app_init) {
 	struct sockaddr_in address = {
 		.sin_family = AF_INET,
 		.sin_addr.s_addr = htonl(ADDRESS),
-		.sin_port = htons(PORT)
+		.sin_port = htons(app_init->port ? app_init->port : PORT)
 	};
 	if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
 		perror("\nbind failed");
@@ -343,11 +359,28 @@ void app(const app_init_t *app_init) {
 					task_t task = done_queue[done_head];
 					done_head = (done_head + 1) % QUEUE_SIZE;
 
-					ssize_t bytes_written = write(task.client_fd, task.parsed_res, task.parsed_res_size);
-					if (bytes_written < 0) {
-						perror("\nSocket error, write");
+					// Temporarily make socket blocking so write() waits
+					// for kernel buffer space instead of returning EAGAIN.
+					int flags = fcntl(task.client_fd, F_GETFL, 0);
+					if (flags != -1) {
+						fcntl(task.client_fd, F_SETFL, flags & ~O_NONBLOCK);
 					}
-					free(task.parsed_res);
+
+					size_t total_written = 0;
+					while (total_written < task.parsed_res_size) {
+						ssize_t bytes_written = write(
+								task.client_fd,
+								task.parsed_res + total_written,
+								task.parsed_res_size - total_written);
+						if (bytes_written < 0) {
+							perror("\nSocket error, write");
+							break;
+						}
+						total_written += (size_t) bytes_written;
+					}
+					if (task.parsed_res_needs_free) {
+						free(task.parsed_res);
+					}
 
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task.client_fd, NULL);
 					close(task.client_fd);
@@ -364,6 +397,13 @@ void app(const app_init_t *app_init) {
 				buffer[bytes_read] = '\0';
 
 				pthread_mutex_lock(&work_mutex);
+
+				if ((work_tail + 1) % QUEUE_SIZE == work_head) {
+					pthread_mutex_unlock(&work_mutex);
+					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+					close(fd);
+					continue;
+				}
 
 				work_queue[work_tail].client_fd = fd;
 				snprintf(work_queue[work_tail].req_buffer, BUFFER_SIZE, "%s", buffer);
